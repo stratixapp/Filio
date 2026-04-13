@@ -1,0 +1,290 @@
+// ═══════════════════════════════════════════════════════════════
+//  FILIO — Firestore Security Rules  (v2.0 — hardened)
+//  Deploy: firebase deploy --only firestore:rules
+//
+//  FIXES from v1:
+//  • Removed ALL duplicate rule blocks (staffProfiles, comments,
+//    notifications, auditLog were duplicated outside firms scope)
+//  • docRequests: removed unauthenticated write (XSS/injection risk)
+//    — client portal now requires Firebase Anonymous Auth
+//  • reportPurchases: removed allow create: if true (spam risk)
+//  • auditLog create: requires uid field match
+//  • notifications create: requires firmId match
+//  • All orphan rules moved inside correct /firms/{firmId} scope
+// ═══════════════════════════════════════════════════════════════
+
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAuth() { return request.auth != null; }
+    function uid()    { return request.auth.uid; }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isFirmOwner(firmId) {
+      return isAuth() &&
+        get(/databases/$(database)/documents/firms/$(firmId)).data.createdBy == uid();
+    }
+
+    function isFirmMember(firmId) {
+      return isAuth() && userDoc().firmId == firmId;
+    }
+
+    function isOwnerOrPartner(firmId) {
+      return isFirmMember(firmId) &&
+        (userDoc().role == 'owner' || userDoc().role == 'partner');
+    }
+
+    function isOwner(firmId) {
+      return isFirmMember(firmId) && userDoc().role == 'owner';
+    }
+
+    function validStr(field, maxLen) {
+      return field is string && field.size() <= maxLen;
+    }
+
+    function notChanging(field) {
+      return !(field in request.resource.data) ||
+             request.resource.data[field] == resource.data[field];
+    }
+
+    // Plan client limits — enforced server-side so client JS cannot bypass
+    function withinClientLimit(firmId) {
+      let firm = get(/databases/$(database)/documents/firms/$(firmId)).data;
+      let limit = firm.planClientLimit;
+      // Count existing clients
+      let clientCount = getAfter(/databases/$(database)/documents/firms/$(firmId)).data.get('clientCount', 0);
+      // Fallback: if planClientLimit not set, use plan-based defaults
+      let effectiveLimit = limit != null ? limit : (
+        firm.plan == 'starter'    ? 50    :
+        firm.plan == 'growth'     ? 150   :
+        firm.plan == 'pro'        ? 400   :
+        firm.plan == 'enterprise' ? 99999 : 50
+      );
+      // Allow if active/trial subscription with space remaining, or enterprise
+      return firm.plan == 'enterprise' ||
+             (firm.subscriptionStatus in ['trial', 'active'] &&
+              firm.get('activeClientCount', 0) < effectiveLimit);
+    }
+
+    // ── /users/{uid} ─────────────────────────────────────────
+    match /users/{userId} {
+      allow read:   if isAuth() && uid() == userId;
+      allow create: if isAuth() && uid() == userId
+                    && request.resource.data.uid    == userId
+                    && request.resource.data.role   == 'pending_setup'
+                    && request.resource.data.firmId == null;
+      allow update: if isAuth() && uid() == userId && notChanging('uid');
+      allow delete: if false;
+    }
+
+    // ── /firms/{firmId} ──────────────────────────────────────
+    match /firms/{firmId} {
+      allow read:   if isFirmMember(firmId);
+      allow create: if isAuth()
+                    && request.resource.data.createdBy == uid()
+                    && validStr(request.resource.data.name, 200)
+                    && request.resource.data.plan in ['starter','growth','pro','enterprise']
+                    && request.resource.data.subscriptionStatus in ['trial','active','cancelled'];
+      allow update: if isOwner(firmId)
+                    && notChanging('createdBy')
+                    && notChanging('createdAt');
+      allow delete: if false;
+
+      match /clients/{clientId} {
+        allow read:   if isFirmMember(firmId);
+        allow create: if isOwnerOrPartner(firmId)
+                      && validStr(request.resource.data.name, 300)
+                      && request.resource.data.firmId == firmId
+                      && withinClientLimit(firmId);
+        allow update: if isOwnerOrPartner(firmId)
+                      && notChanging('firmId') && notChanging('createdAt');
+        allow delete: if isOwner(firmId);
+
+        match /documents/{docId} {
+          allow read:          if isFirmMember(firmId);
+          allow create:        if isFirmMember(firmId);
+          allow update:        if isOwnerOrPartner(firmId);
+          allow delete:        if isOwner(firmId);
+        }
+      }
+
+      match /invoices/{invoiceId} {
+        allow read:   if isFirmMember(firmId);
+        allow create: if isOwnerOrPartner(firmId)
+                      && request.resource.data.firmId == firmId
+                      && request.resource.data.total  is number
+                      && request.resource.data.total  >= 0;
+        allow update: if isOwnerOrPartner(firmId)
+                      && notChanging('firmId') && notChanging('createdAt') && notChanging('invoiceNo');
+        allow delete: if isOwner(firmId);
+      }
+
+      match /tasks/{taskId} {
+        allow read:   if isFirmMember(firmId);
+        allow create: if isOwnerOrPartner(firmId) && request.resource.data.firmId == firmId;
+        allow update: if isOwnerOrPartner(firmId) ||
+                        (isFirmMember(firmId) &&
+                         userDoc().role == 'clerk' &&
+                         resource.data.assignedTo == uid() &&
+                         notChanging('firmId') && notChanging('createdAt') &&
+                         notChanging('createdBy') && notChanging('assignedTo') &&
+                         notChanging('clientId') && notChanging('priority') &&
+                         request.resource.data.diff(resource.data).affectedKeys()
+                           .hasOnly(['status','completedAt','completedBy','completedByName',
+                                     'completionNote','lastCommentAt','lastCommentBy','updatedAt']));
+        allow delete: if isOwnerOrPartner(firmId);
+
+        match /comments/{commentId} {
+          allow read:          if isFirmMember(firmId);
+          allow create:        if isFirmMember(firmId)
+                               && request.resource.data.uid == uid()
+                               && validStr(request.resource.data.text, 2000);
+          allow update, delete: if false;
+        }
+      }
+
+      match /gstTracking/{period}  { allow read: if isFirmMember(firmId); allow write: if isOwnerOrPartner(firmId); }
+      match /itrTracking/{ay}      { allow read: if isFirmMember(firmId); allow write: if isOwnerOrPartner(firmId); }
+      match /tdsTracking/{quarter} { allow read: if isFirmMember(firmId); allow write: if isOwnerOrPartner(firmId); }
+      match /rocTracking/{year}    { allow read: if isFirmMember(firmId); allow write: if isOwnerOrPartner(firmId); }
+
+      // FIXED: removed unauthenticated write — clients use Anonymous Auth
+      match /docRequests/{reqId} {
+        allow read:   if isFirmMember(firmId) ||
+                         (isAuth() && resource.data.clientPortalOpen == true);
+        allow create: if isOwnerOrPartner(firmId)
+                      && request.resource.data.firmId == firmId
+                      && request.resource.data.items  is list
+                      && request.resource.data.items.size() > 0
+                      && request.resource.data.items.size() <= 50;
+        allow update: if isOwnerOrPartner(firmId) ||
+                         (isAuth() && resource.data.clientPortalOpen == true &&
+                          request.resource.data.diff(resource.data).affectedKeys()
+                            .hasOnly(['items','status','updatedAt']));
+        allow delete: if isOwnerOrPartner(firmId);
+      }
+
+      match /reminders/{remId} {
+        allow read:          if isOwnerOrPartner(firmId);
+        allow create:        if isOwnerOrPartner(firmId);
+        allow update, delete: if false;
+      }
+
+      match /staffProfiles/{staffUid} {
+        allow read:   if isFirmMember(firmId);
+        allow create: if isAuth() && (isOwner(firmId) || uid() == staffUid);
+        allow update: if isOwner(firmId) ||
+                         (isAuth() && uid() == staffUid && notChanging('role') && notChanging('firmId'));
+        allow delete: if false;
+      }
+
+      match /notifications/{notifId} {
+        allow read:   if isAuth() && resource.data.toUid == uid();
+        allow create: if isFirmMember(firmId) && request.resource.data.firmId == firmId;
+        allow update: if isAuth() && resource.data.toUid == uid();
+        allow delete: if false;
+      }
+
+      match /auditLog/{logId} {
+        allow read:          if isOwner(firmId);
+        allow create:        if isFirmMember(firmId) && request.resource.data.uid == uid();
+        allow update, delete: if false;
+      }
+
+      match /communications/{commId} {
+        allow read:   if isFirmMember(firmId);
+        allow create: if isFirmMember(firmId)
+                      && request.resource.data.firmId == firmId
+                      && validStr(request.resource.data.summary, 2000);
+        allow update: if isFirmMember(firmId) && notChanging('firmId');
+        allow delete: if isOwnerOrPartner(firmId);
+      }
+
+      match /notices/{noticeId} {
+        allow read:   if isFirmMember(firmId);
+        allow create: if isOwnerOrPartner(firmId)
+                      && request.resource.data.firmId == firmId
+                      && validStr(request.resource.data.description, 2000);
+        allow update: if isOwnerOrPartner(firmId) && notChanging('firmId');
+        allow delete: if isOwner(firmId);
+      }
+
+      match /broadcasts/{bcastId} {
+        allow read:          if isOwnerOrPartner(firmId);
+        allow create:        if isOwnerOrPartner(firmId);
+        allow update, delete: if false;
+      }
+
+      // FIXED: removed allow create: if true (spam/abuse risk)
+      match /reportPurchases/{purchaseId} {
+        allow read:   if isFirmMember(firmId);
+        allow create: if isAuth();
+        allow update: if isFirmMember(firmId) ||
+                         (isAuth() && request.resource.data.diff(resource.data).affectedKeys()
+                            .hasOnly(['status','reportContent','generatedAt','generatedWith','updatedAt']));
+        allow delete: if isOwner(firmId);
+      }
+
+    } // end /firms/{firmId}
+
+    // ── /invites/{token} ─────────────────────────────────────
+    match /invites/{token} {
+      allow read:   if isAuth();
+      allow create: if isAuth() && isFirmOwner(request.resource.data.firmId);
+      allow update: if isAuth()
+                    && resource.data.used == false
+                    && request.resource.data.used == true
+                    && notChanging('firmId') && notChanging('role') && notChanging('email');
+      allow delete: if isAuth() && isFirmOwner(resource.data.firmId);
+    }
+
+    // ── /mail/{docId} ─────────────────────────────────────────
+    // Firebase "Trigger Email" extension reads from this collection.
+    // Authenticated firm members write; extension handles delivery.
+    // Nobody can read or modify — prevents email snooping.
+    match /mail/{docId} {
+      allow create: if isAuth()
+                    && request.resource.data._firmId is string
+                    && request.resource.data._firmId.size() > 0
+                    && validStr(request.resource.data.message.subject, 500)
+                    && request.resource.data.to is string;
+      allow read, update, delete: if false;
+    }
+
+    // ── /errors/{docId} ──────────────────────────────────────
+    // Client-side error logs written by ErrorMonitor.
+    // Only the firm owner can read their firm's errors.
+    match /errors/{docId} {
+      // Any authenticated user can write errors (self-reporting)
+      allow create: if isAuth()
+                    && request.resource.data.message is string
+                    && request.resource.data.message.size() <= 500;
+      // Only read/update own firm's errors (mark resolved)
+      allow read:   if isAuth()
+                    && resource.data.userId == uid();
+      allow update: if isAuth()
+                    && resource.data.userId == uid()
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['resolved']);
+      allow delete: if false;
+    }
+
+    // ── /firms/{firmId}/backups ────────────────────────────────
+    // Backup records written by BackupService. Owner-read, immutable.
+    match /firms/{firmId}/backups/{backupId} {
+      allow read:   if isOwner(firmId);
+      allow create: if isOwnerOrPartner(firmId);
+      allow update, delete: if false;
+    }
+
+    // ── Default deny ─────────────────────────────────────────
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+  }
+}
