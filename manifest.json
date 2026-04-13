@@ -1,0 +1,30 @@
+{
+  "name": "Filio — CA Office OS",
+  "short_name": "Filio",
+  "description": "Your entire CA firm. One dashboard.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0A1628",
+  "theme_color": "#C9A84C",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect width='192' height='192' rx='24' fill='%230A1628'/><path d='M48 96 L96 48 L144 96 L96 144 Z' fill='%23C9A84C' opacity='.9'/><circle cx='96' cy='96' r='20' fill='%23C9A84C'/></svg>",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='64' fill='%230A1628'/><path d='M128 256 L256 128 L384 256 L256 384 Z' fill='%23C9A84C' opacity='.9'/><circle cx='256' cy='256' r='52' fill='%23C9A84C'/></svg>",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["business", "finance", "productivity"],
+  "shortcuts": [
+    { "name": "Dashboard",  "url": "/#/dashboard",  "description": "Open firm dashboard" },
+    { "name": "Clients",    "url": "/#/clients",    "description": "Manage clients" },
+    { "name": "GST Tracker","url": "/#/gst-tracker","description": "GST filing tracker" }
+  ]
+}

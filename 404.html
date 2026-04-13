@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <script>
+    // GitHub Pages SPA fix — redirect 404s back to index.html with hash route
+    var path = window.location.pathname;
+    var search = window.location.search;
+    var hash = window.location.hash;
+    // Preserve the path as a hash route
+    var redirect = window.location.origin + window.location.pathname.replace(/\/[^/]*$/, '/') +
+      '?' + encodeURIComponent(path.slice(1)) +
+      (search ? '&' + search.slice(1) : '') +
+      hash;
+    window.location.replace(redirect);
+  </script>
+</head>
+<body></body>
+</html>
